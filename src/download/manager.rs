@@ -168,31 +168,32 @@ async fn download_from_peer(
     // Download pieces
     let mut pieces_downloaded = 0usize;
     loop {
-        // Find a piece to download - use RANDOM selection so peers don't fight over the same pieces!
+        // SEQUENTIAL download with FIRST and LAST piece priority (great for video streaming!)
         let piece_to_download = {
             let mut pieces_guard = pieces.lock().unwrap();
+            let total_pieces = pieces_guard.len();
             
-            // Collect all available pieces
-            let available: Vec<_> = pieces_guard.iter()
-                .enumerate()
-                .filter(|(idx, p)| !p.is_complete() && !p.in_progress && conn.has_piece(*idx))
-                .map(|(idx, _)| idx)
-                .collect();
-            
-            if available.is_empty() {
-                None
-            } else {
-                // Pick a RANDOM piece to avoid conflicts
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as usize;
-                let random_idx = (seed ^ (piece_index + pieces_downloaded)) % available.len();
-                let piece_idx = available[random_idx];
-                
-                // Mark as in progress
-                pieces_guard[piece_idx].in_progress = true;
-                
-                let p = &pieces_guard[piece_idx];
+            // Priority 1: First piece (for video preview)
+            if !pieces_guard[0].is_complete() && !pieces_guard[0].in_progress && conn.has_piece(0) {
+                pieces_guard[0].in_progress = true;
+                let p = &pieces_guard[0];
                 Some((p.index, p.length, p.hash))
+            }
+            // Priority 2: Last piece (for video duration info)
+            else if total_pieces > 1 && !pieces_guard[total_pieces - 1].is_complete() && 
+                    !pieces_guard[total_pieces - 1].in_progress && conn.has_piece(total_pieces - 1) {
+                pieces_guard[total_pieces - 1].in_progress = true;
+                let p = &pieces_guard[total_pieces - 1];
+                Some((p.index, p.length, p.hash))
+            }
+            // Priority 3: Sequential from beginning
+            else {
+                pieces_guard.iter_mut()
+                    .find(|p| !p.is_complete() && !p.in_progress && conn.has_piece(p.index))
+                    .map(|p| {
+                        p.in_progress = true;
+                        (p.index, p.length, p.hash)
+                    })
             }
         };
         
