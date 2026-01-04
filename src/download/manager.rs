@@ -43,35 +43,79 @@ impl DownloadManager {
         })
     }
     
-    pub async fn download_from_peers(&self, peers: Vec<SocketAddr>) -> Result<()> {
+    pub async fn download_from_peers(&self, initial_peers: Vec<SocketAddr>) -> Result<()> {
         let (tx, mut rx) = mpsc::channel(500); // Increased buffer
         
         let active_peers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peers_queue = Arc::new(Mutex::new(std::collections::VecDeque::from(initial_peers.clone())));
         
-        // Spawn tasks for MANY peers - 50 simultaneous connections for maximum speed!
-        for peer_addr in peers.iter().take(50) {
-            let tx = tx.clone();
-            let metainfo = Arc::clone(&self.metainfo);
-            let pieces = Arc::clone(&self.pieces);
-            let peer_id = self.peer_id;
-            let peer_addr = *peer_addr;
-            let active_counter = Arc::clone(&active_peers);
-            
-            tokio::spawn(async move {
-                active_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = download_from_peer(peer_addr, metainfo, pieces, peer_id, tx).await;
-                active_counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            });
-        }
+        // Peer Manager Task - Keeps connections alive
+        let manager_active_peers = active_peers.clone();
+        let manager_metainfo = self.metainfo.clone();
+        let manager_pieces = self.pieces.clone();
+        let manager_peer_id = self.peer_id;
+        let manager_tx = tx.clone();
+        let manager_queue = peers_queue.clone();
         
-        drop(tx); // Drop the original sender
-        
+        tokio::spawn(async move {
+            loop {
+                let current_active = manager_active_peers.load(std::sync::atomic::Ordering::Relaxed);
+                
+                // Target 50 connections, or at least try to use all known peers
+                if current_active < 50 {
+                    let next_peer = {
+                        let mut queue = manager_queue.lock().unwrap();
+                        queue.pop_front()
+                    };
+                    
+                    if let Some(peer_addr) = next_peer {
+                        let active_counter = manager_active_peers.clone();
+                        let m_metainfo = manager_metainfo.clone();
+                        let m_pieces = manager_pieces.clone();
+                        let m_tx = manager_tx.clone();
+                        let m_queue = manager_queue.clone();
+                        let m_peer_id = manager_peer_id;
+                        
+                        tokio::spawn(async move {
+                            active_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            
+                            // Try to download
+                            let result = download_from_peer(peer_addr, m_metainfo, m_pieces, m_peer_id, m_tx).await;
+                            
+                            active_counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                            
+                            // If peer was valid but disconnected, add back to queue
+                            // Adaptive retry: If we are desperate (<10 peers), retry fast!
+                            let current_active = active_counter.load(std::sync::atomic::Ordering::Relaxed);
+                            let retry_delay = if current_active < 10 {
+                                std::time::Duration::from_secs(1) // Desperate mode: 1s
+                            } else {
+                                std::time::Duration::from_secs(5) // Normal mode: 5s
+                            };
+                            
+                            tokio::time::sleep(retry_delay).await;
+                            {
+                                let mut queue = m_queue.lock().unwrap();
+                                queue.push_back(peer_addr);
+                            }
+                        });
+                    } else {
+                        // Queue empty, wait a bit
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                } else {
+                    // Max connections reached, wait
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        });
+
         // Track download speed
         let start_time = std::time::Instant::now();
         let mut downloaded_bytes = 0u64;
         let mut last_report = std::time::Instant::now();
         
-        println!("Connecting to peers...");
+        println!("Connecting to peers... (Found {})", initial_peers.len());
         
         // Collect completed pieces
         while let Some((piece_index, data)) = rx.recv().await {

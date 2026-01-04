@@ -8,20 +8,23 @@ pub struct Piece {
     pub length: usize,
     pub hash: [u8; 20],
     blocks: Vec<Option<Vec<u8>>>,
+    requested: Vec<bool>, // Track which blocks we've asked for
     num_blocks: usize,
-    pub in_progress: bool, // Track if this piece is being downloaded
+    pub in_progress: bool,
 }
 
 impl Piece {
     pub fn new(index: usize, length: usize, hash: [u8; 20]) -> Self {
         let num_blocks = (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
         let blocks = vec![None; num_blocks];
+        let requested = vec![false; num_blocks];
         
         Piece {
             index,
             length,
             hash,
             blocks,
+            requested,
             num_blocks,
             in_progress: false,
         }
@@ -73,9 +76,12 @@ impl Piece {
         Some(result)
     }
     
-    pub fn next_block_to_request(&self) -> Option<(usize, usize)> {
+    pub fn next_block_to_request(&mut self) -> Option<(usize, usize)> {
         for (i, block) in self.blocks.iter().enumerate() {
-            if block.is_none() {
+            // Find a block that is missing AND hasn't been requested yet
+            if block.is_none() && !self.requested[i] {
+                self.requested[i] = true; // Mark as requested so we don't ask again
+                
                 let begin = i * BLOCK_SIZE;
                 let length = if i == self.num_blocks - 1 {
                     // Last block might be smaller
