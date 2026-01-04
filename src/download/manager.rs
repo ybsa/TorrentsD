@@ -44,10 +44,10 @@ impl DownloadManager {
     }
     
     pub async fn download_from_peers(&self, peers: Vec<SocketAddr>) -> Result<()> {
-        let (tx, mut rx) = mpsc::channel(200);
+        let (tx, mut rx) = mpsc::channel(500); // Increased buffer
         
-        // Spawn tasks for each peer - increased from 5 to 20 for faster downloads
-        for peer_addr in peers.iter().take(20) {
+        // Spawn tasks for MANY peers - 50 simultaneous connections for maximum speed!
+        for peer_addr in peers.iter().take(50) {
             let tx = tx.clone();
             let metainfo = Arc::clone(&self.metainfo);
             let pieces = Arc::clone(&self.pieces);
@@ -74,8 +74,8 @@ impl DownloadManager {
             
             downloaded_bytes += data.len() as u64;
             
-            // Report progress every 2 seconds
-            if last_report.elapsed().as_secs() >= 2 {
+            // Report progress every 1 second for faster feedback
+            if last_report.elapsed().as_secs() >= 1 {
                 let (complete, total) = self.progress();
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let speed_mbps = (downloaded_bytes as f64 / elapsed) / 1_048_576.0;
@@ -119,7 +119,16 @@ async fn download_from_peer(
     peer_id: [u8; 20],
     tx: mpsc::Sender<(usize, Vec<u8>)>,
 ) -> Result<()> {
-    let mut conn = PeerConnection::connect(peer_addr, &metainfo.info_hash, &peer_id).await?;
+    // Add timeout for slow peers
+    let connect_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        PeerConnection::connect(peer_addr, &metainfo.info_hash, &peer_id)
+    ).await;
+    
+    let mut conn = match connect_result {
+        Ok(Ok(c)) => c,
+        _ => return Ok(()), // Skip slow/failed peers
+    };
     
     // Wait for bitfield or first message
     let _ = conn.receive_message().await?;
@@ -127,15 +136,25 @@ async fn download_from_peer(
     // Send interested
     conn.send_interested().await?;
     
-    // Wait for unchoke
-    loop {
-        if let Some(msg) = conn.receive_message().await? {
-            if matches!(msg, Message::Unchoke) {
-                break;
+    // Wait for unchoke with timeout
+    let unchoke_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        async {
+            loop {
+                if let Some(msg) = conn.receive_message().await? {
+                    if matches!(msg, Message::Unchoke) {
+                        break;
+                    }
+                } else {
+                    return Err(anyhow::anyhow!("Connection closed"));
+                }
             }
-        } else {
-            return Ok(()); // Connection closed
+            Ok::<(), anyhow::Error>(())
         }
+    ).await;
+    
+    if unchoke_result.is_err() {
+        return Ok(()); // Skip peers that don't unchoke
     }
     
     // Download pieces
@@ -149,10 +168,10 @@ async fn download_from_peer(
         };
         
         if let Some((piece_index, piece_length, piece_hash)) = piece_to_download {
-            // Download this piece with pipelining (request multiple blocks at once)
+            // Download this piece with aggressive pipelining (request many blocks at once)
             let mut piece = Piece::new(piece_index, piece_length, piece_hash);
             
-            const PIPELINE_SIZE: usize = 5; // Request 5 blocks at a time for speed
+            const PIPELINE_SIZE: usize = 10; // Request 10 blocks at a time for maximum speed!
             let mut pending_requests = 0;
             
             // Pipeline requests

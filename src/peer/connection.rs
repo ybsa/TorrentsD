@@ -42,7 +42,7 @@ impl PeerConnection {
         
         Ok(PeerConnection {
             stream,
-            buffer: BytesMut::with_capacity(16384),
+            buffer: BytesMut::with_capacity(131072), // 128KB buffer for speed
             addr,
             peer_choking: true,
             am_interested: false,
@@ -65,8 +65,8 @@ impl PeerConnection {
                 return Ok(Some(msg));
             }
             
-            // Read more data from the stream
-            let mut temp_buf = vec![0u8; 4096];
+            // Read more data from the stream - 64KB chunks for speed
+            let mut temp_buf = vec![0u8; 65536];
             let n = self.stream.read(&mut temp_buf).await
                 .context("Failed to read from peer")?;
             
