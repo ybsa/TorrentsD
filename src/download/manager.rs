@@ -358,9 +358,10 @@ async fn download_from_peer(
             let mut piece = Piece::new(piece_index, piece_length, piece_hash);
             
             // Adaptive Pipeline: Start small, grow if peer is fast!
-            // Range: 1 (safe) to 50 (max speed)
+            // Range: 1 (safe) to 20 (stable max)
             let mut pipeline_size: usize = 3; 
             let mut pending_requests = 0;
+            let mut fast_streak = 0;
             
             // Pipeline requests
             while !piece.is_complete() {
@@ -394,17 +395,22 @@ async fn download_from_peer(
                                         pending_requests -= 1;
                                         
                                         // ADAPTIVE LOGIC:
-                                        // Fast peer (<500ms)? Increase pipeline!
-                                        // Slow peer (>2s)? Decrease pipeline.
+                                        // Fast peer (<500ms)? Increase pipeline slowly (requiring streak).
+                                        // Slow peer (>2s)? Decrease pipeline immediately.
                                         let duration = request_start.elapsed();
                                         if duration < std::time::Duration::from_millis(500) {
-                                            if pipeline_size < 50 {
-                                                pipeline_size += 1;
+                                            fast_streak += 1;
+                                            if fast_streak >= 5 {
+                                                if pipeline_size < 20 {
+                                                    pipeline_size += 1;
+                                                }
+                                                fast_streak = 0;
                                             }
                                         } else if duration > std::time::Duration::from_secs(2) {
                                             if pipeline_size > 1 {
                                                 pipeline_size /= 2;
                                             }
+                                            fast_streak = 0;
                                         }
                                     }
                                 }
