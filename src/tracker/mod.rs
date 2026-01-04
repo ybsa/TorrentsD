@@ -1,5 +1,4 @@
 use anyhow::{Result, Context, bail};
-use reqwest::blocking::Client;
 use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use crate::bencode::{BencodeValue, decode};
 
@@ -19,8 +18,8 @@ pub struct TrackerRequest {
     pub left: u64,
 }
 
-pub fn announce(tracker_url: &str, request: &TrackerRequest) -> Result<TrackerResponse> {
-    let client = Client::builder()
+pub async fn announce(tracker_url: &str, request: &TrackerRequest) -> Result<TrackerResponse> {
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .context("Failed to create HTTP client")?;
@@ -39,6 +38,7 @@ pub fn announce(tracker_url: &str, request: &TrackerRequest) -> Result<TrackerRe
     
     let response = client.get(&url)
         .send()
+        .await
         .context("Failed to send tracker request")?;
     
     if !response.status().is_success() {
@@ -46,6 +46,7 @@ pub fn announce(tracker_url: &str, request: &TrackerRequest) -> Result<TrackerRe
     }
     
     let body = response.bytes()
+        .await
         .context("Failed to read tracker response")?;
     
     parse_tracker_response(&body)

@@ -76,6 +76,7 @@ async fn download_torrent(torrent_path: PathBuf, output_dir: &str, port: u16) ->
     };
     
     let tracker_response = tracker::announce(&metainfo.announce, &tracker_request)
+        .await
         .context("Failed to contact tracker")?;
     
     println!("Found {} peers", tracker_response.peers.len());
