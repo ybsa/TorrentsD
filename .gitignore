@@ -1,10 +1,10 @@
 # Build artifacts
 /target/
-Cargo.lock
 
 # IDE
 .vscode/
 .idea/
+.vs/
 *.swp
 *.swo
 *~
@@ -13,11 +13,8 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-# Test files
-*.torrent
-test_file.txt
+# Downloads (test data)
 downloads/
 
-# Build status files
-BUILD_STATUS.md
-BUILD_TROUBLESHOOTING.md
+# Cargo.lock is usually committed for binaries, but optional
+# Cargo.lock

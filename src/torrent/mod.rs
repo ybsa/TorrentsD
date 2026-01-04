@@ -1,7 +1,7 @@
 use std::path::Path;
 use anyhow::{Result, Context, bail};
 use sha1::{Sha1, Digest};
-use crate::bencode::{BencodeValue, decode, encode};
+use crate::bencode::{decode, encode};
 
 #[derive(Debug, Clone)]
 pub struct Metainfo {

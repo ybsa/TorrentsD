@@ -94,6 +94,14 @@ impl Piece {
         }
         None
     }
+
+    pub fn mark_complete(&mut self) {
+        // Mark as complete but drop the data to save RAM
+        for block in &mut self.blocks {
+            *block = Some(Vec::new());
+        }
+        self.in_progress = false;
+    }
 }
 
 #[cfg(test)]

@@ -70,7 +70,7 @@ impl DownloadManager {
         // ----------------------------------------------------------------
         // 1. TRACKER RE-ANNOUNCE LOOP (Dynamic Discovery)
         // ----------------------------------------------------------------
-        let tracker_url = self.metainfo.announce_url.clone();
+        let tracker_url = self.metainfo.announce.clone();
         let tracker_info_hash = self.metainfo.info_hash;
         let tracker_peer_id = self.peer_id;
         let tracker_queue = peers_queue.clone();
@@ -78,7 +78,7 @@ impl DownloadManager {
         let tracker_total_peers = manager_total_peers.clone();
         let tracker_pieces = self.pieces.clone();
         let tracker_active = active_peers.clone();
-        let total_size = self.metainfo.info.length; // Assuming single file or sum
+        let total_size = self.metainfo.info.total_length; // Assuming single file or sum
         
         tokio::spawn(async move {
             use crate::tracker::{announce, TrackerRequest};
@@ -89,16 +89,12 @@ impl DownloadManager {
             loop {
                 let current_active = tracker_active.load(std::sync::atomic::Ordering::Relaxed);
                 
-                // Adaptive Interval: 
-                // - If desperate (< 5 peers): Re-announce every 30 seconds
-                // - If OK (< 20 peers): Re-announce every 2 minutes
-                // - If Good (> 20 peers): Re-announce every 15 minutes
-                let interval = if current_active < 5 {
-                    std::time::Duration::from_secs(30)
-                } else if current_active < 20 {
-                    std::time::Duration::from_secs(120)
+                // Adaptive Interval: Aggressive Peer Discovery
+                // User Request: 45 seconds to be safe from bans but still fast.
+                let interval = if current_active < 50 {
+                    std::time::Duration::from_secs(45) // User requested 45s
                 } else {
-                    std::time::Duration::from_secs(900)
+                    std::time::Duration::from_secs(300) // Maintenance every 5 mins
                 };
                 
                 println!("Creating tracker re-announce request... (Active: {})", current_active);
@@ -109,7 +105,7 @@ impl DownloadManager {
                      let pieces = tracker_pieces.lock().unwrap();
                      let completed = pieces.iter().filter(|p| p.is_complete()).count();
                      let d = (completed * 16384) as u64; // Approximation
-                     let l = if total_size > d { total_size - d } else { 0 };
+                     let l = if (total_size as u64) > d { (total_size as u64) - d } else { 0 };
                      (d, l)
                 };
 
@@ -158,8 +154,8 @@ impl DownloadManager {
             loop {
                 let current_active = manager_active_peers.load(std::sync::atomic::Ordering::Relaxed);
                 
-                // Target 50 connections, or at least try to use all known peers
-                if current_active < 50 {
+                // Target 200 connections! Use EVERYTHING available.
+                if current_active < 200 {
                     let next_peer = {
                         let mut queue = manager_queue.lock().unwrap();
                         queue.pop_front()
@@ -319,7 +315,7 @@ async fn download_from_peer(
     }
     
     // Download pieces
-    let mut pieces_downloaded = 0usize;
+    // let mut pieces_downloaded = 0usize; // Unused
     loop {
         // SEQUENTIAL download with FIRST and LAST piece priority (great for video streaming!)
         let piece_to_download = {
@@ -351,9 +347,6 @@ async fn download_from_peer(
         };
         
         if let Some((piece_index, piece_length, piece_hash)) = piece_to_download {
-            // Download this piece with conservative pipelining to keep peers happy
-            let mut piece = Piece::new(piece_index, piece_length, piece_hash);
-            
             // Download this piece with adaptive pipelining
             let mut piece = Piece::new(piece_index, piece_length, piece_hash);
             
@@ -381,6 +374,7 @@ async fn download_from_peer(
                 let request_start = std::time::Instant::now();
                 
                 // Wait for a response with timeout to detect stalled peers
+                // 30s timeout: If no message, send Keep-Alive pulse to stay connected!
                 let msg_result = tokio::time::timeout(
                     std::time::Duration::from_secs(30), 
                     conn.receive_message()
@@ -423,28 +417,42 @@ async fn download_from_peer(
                             Message::Unchoke => {
                                 // We are unchoked! Loop will continue and send requests
                             },
+                            Message::KeepAlive => {
+                                // Just a heartbeat, ignore
+                            },
                             _ => {} // Ignore other messages
                         }
                     },
-                    Ok(Ok(None)) => return Ok(()), // Connection closed
+                    Ok(Ok(None)) => return Ok(()), // Connection closed by peer
                     Ok(Err(_)) => return Ok(()),   // Protocol error
-                    Err(_) => return Ok(()),       // Timeout
+                    Err(_) => {
+                        // TIMEOUT hit (30s)!
+                        // Send Keep-Alive packet to tell peer we are still here.
+                        // If we don't do this, they will disconnect us after 60-120s.
+                        if let Err(_) = conn.send_message(&Message::KeepAlive).await {
+                             return Ok(()); // Connection dead
+                        }
+                        // Continue loop (go back to request/receive)
+                    }, 
                 }
             }
             
-            // Verify and save the piece
+            // Verify and save piece
             if piece.verify() {
                 if let Some(data) = piece.data() {
+                    // Send to storage FIRST (before we drop data)
+                    if tx.send((piece_index, data)).await.is_err() {
+                        return Ok(());
+                    }
+
                     // Update the shared pieces
+                    // CRITICAL MEMORY FIX: Don't clone data! Just mark as complete.
                     {
                         let mut pieces_guard = pieces.lock().unwrap();
-                        pieces_guard[piece_index] = piece.clone();
-                        pieces_guard[piece_index].in_progress = false; // Mark as complete
+                        pieces_guard[piece_index].mark_complete();
                     }
                     
-                    // Send to storage
-                    pieces_downloaded += 1;
-                    let _ = tx.send((piece_index, data)).await;
+                    // pieces_downloaded += 1;
                 }
             } else {
                 // Verification failed, mark as not in progress so another peer can try
@@ -452,10 +460,15 @@ async fn download_from_peer(
                 pieces_guard[piece_index].in_progress = false;
             }
         } else {
-            // No more pieces to download from this peer
-            break;
+            // NO PIECE FOUND - Vital Fix for "Instant Drop"
+            // If we have no pieces to download (all in progress or peer has none),
+            // WE MUST NOT EXIT! We must wait.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            
+            // Optional: send NotInterested if we were interested?
+            // But we might become interested soon.
+            // Just sleeping is fine.
         }
     }
-    
-    Ok(())
+    // Loop is now technically infinite unless cancelled or error, preventing unreachable code warning
 }

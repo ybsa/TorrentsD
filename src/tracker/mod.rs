@@ -1,6 +1,6 @@
 use anyhow::{Result, Context, bail};
 use std::net::{SocketAddr, IpAddr, Ipv4Addr};
-use crate::bencode::{BencodeValue, decode};
+use crate::bencode::decode;
 
 #[derive(Debug, Clone)]
 pub struct TrackerResponse {
