@@ -1,0 +1,23 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+*.torrent
+test_file.txt
+downloads/
+
+# Build status files
+BUILD_STATUS.md
+BUILD_TROUBLESHOOTING.md
