@@ -215,26 +215,49 @@ async fn download_from_peer(
             
             // Pipeline requests
             while !piece.is_complete() {
-                // Send requests up to pipeline size
-                while pending_requests < PIPELINE_SIZE {
+                // Send requests up to pipeline size - BUT ONLY IF NOT CHOKED
+                while !conn.is_choking() && pending_requests < PIPELINE_SIZE {
                     if let Some((begin, length)) = piece.next_block_to_request() {
-                        conn.request_piece(piece_index as u32, begin as u32, length as u32).await?;
-                        pending_requests += 1;
+                        match conn.request_piece(piece_index as u32, begin as u32, length as u32).await {
+                            Ok(_) => pending_requests += 1,
+                            Err(_) => break, // If request fails (e.g. choked mid-loop), stop requesting
+                        }
                     } else {
                         break;
                     }
                 }
                 
-                // Wait for a response
-                if let Some(msg) = conn.receive_message().await? {
-                    if let Message::Piece { index, begin: msg_begin, data } = msg {
-                        if index as usize == piece_index {
-                            piece.add_block(msg_begin as usize, data);
-                            pending_requests -= 1;
+                // Wait for a response with timeout to detect stalled peers
+                let msg_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30), 
+                    conn.receive_message()
+                ).await;
+
+                match msg_result {
+                    Ok(Ok(Some(msg))) => {
+                        match msg {
+                            Message::Piece { index, begin: msg_begin, data } => {
+                                if index as usize == piece_index {
+                                    if piece.add_block(msg_begin as usize, data) {
+                                        pending_requests -= 1;
+                                    }
+                                }
+                            },
+                            Message::Choke => {
+                                // Peer choked us - we must wait for unchoke
+                                // We also assume pending requests are dropped by peer
+                                pending_requests = 0; 
+                                // Piece logic will re-request these blocks when unchoked because they weren't added to 'piece' yet
+                            },
+                            Message::Unchoke => {
+                                // We are unchoked! Loop will continue and send requests
+                            },
+                            _ => {} // Ignore other messages
                         }
-                    }
-                } else {
-                    return Ok(()); // Connection closed
+                    },
+                    Ok(Ok(None)) => return Ok(()), // Connection closed
+                    Ok(Err(_)) => return Ok(()),   // Protocol error
+                    Err(_) => return Ok(()),       // Timeout
                 }
             }
             
